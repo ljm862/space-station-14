@@ -92,6 +92,12 @@ public sealed class NavMeshRegionTest : GameTest
             new EntityCoordinates(_grid, new Vector2(x + 0.5f, y + 0.5f)));
     }
 
+    private static void SpawnOn(EntityUid grid, int x, int y, string prototype, IEntityManager entMan)
+    {
+        entMan.SpawnAtPosition(prototype,
+            new EntityCoordinates(grid, new Vector2(x + 0.5f, y + 0.5f)));
+    }
+
     #endregion
 
     [Test]
@@ -187,6 +193,112 @@ public sealed class NavMeshRegionTest : GameTest
         {
             Assert.That(regionA.AABB, Is.EqualTo(new Box2(3, 1, 4, 4)));
             Assert.That(regionB.AABB, Is.EqualTo(new Box2(1, 1, 2, 4)));
+        }
+    }
+
+    [Test]
+    public async Task RegionAABBOverlapDoesNotCauseTileMisassignment()
+    {
+        var mapData = await Pair.CreateTestMap();
+        var grid = mapData.Grid;
+        var map = Server.System<SharedMapSystem>();
+        var platingTile = new Tile(1);
+        const int mapSize = 6;
+
+        await Server.WaitPost(() =>
+        {
+            for (var x = 0; x < mapSize; x++)
+            {
+                for (var y = 0; y < mapSize; y++)
+                {
+                    map.SetTile(grid,
+                        new EntityCoordinates(grid, new Vector2(x + 0.5f, y + 0.5f)),
+                        platingTile);
+                }
+            }
+
+            for (var x = 0; x < mapSize; x++)
+            {
+                SpawnOn(grid, x, 0, "WallSolid", SEntMan);
+                SpawnOn(grid, x, mapSize - 1, "WallSolid", SEntMan);
+            }
+            for (var y = 1; y < mapSize - 1; y++)
+            {
+                SpawnOn(grid, 0, y, "WallSolid", SEntMan);
+                SpawnOn(grid, mapSize - 1, y, "WallSolid", SEntMan);
+            }
+
+            SpawnOn(grid, 2, 1, "WallSolid", SEntMan);
+            SpawnOn(grid, 2, 2, "WallSolid", SEntMan);
+            SpawnOn(grid, 2, 3, "WallSolid", SEntMan);
+            SpawnOn(grid, 3, 4, "WallSolid", SEntMan);
+        });
+
+        await RunTicksSync(60);
+
+        GridPathfindingComponent comp = null;
+        await Server.WaitPost(() =>
+        {
+            comp = SEntMan.GetComponent<GridPathfindingComponent>(grid);
+        });
+
+        Assert.That(comp, Is.Not.Null);
+        Assert.That(comp.Regions, Has.Count.EqualTo(2),
+            $"Expected 2 regions but got {comp.Regions.Count}");
+
+        var leftAabb = new Box2(1, 1, 3, 5);
+        var rightAabb = new Box2(3, 1, 5, 5);
+
+        NavMeshRegion leftRegion = null;
+        NavMeshRegion rightRegion = null;
+
+        foreach (var region in comp.Regions)
+        {
+            if (region.AABB.Equals(leftAabb))
+                leftRegion = region;
+            else if (region.AABB.Equals(rightAabb))
+                rightRegion = region;
+        }
+
+        Assert.That(leftRegion, Is.Not.Null,
+            "Left region with AABB Box2(1, 1, 3, 5) not found");
+        Assert.That(rightRegion, Is.Not.Null,
+            "Right region with AABB Box2(3, 1, 5, 5) not found");
+
+        Assert.That(leftRegion.Tiles, Has.Count.EqualTo(5),
+            $"Left region should have 5 tiles, got {leftRegion.Tiles.Count}");
+        Assert.That(rightRegion.Tiles, Has.Count.EqualTo(7),
+            $"Right region should have 7 tiles, got {rightRegion.Tiles.Count}");
+
+        var overlappingTile = new Vector2i(3, 2);
+
+        // AABB containment (both AABBs contain this tile)
+        Assert.That(leftRegion.AABB.Contains(new Vector2(overlappingTile.X, overlappingTile.Y)), Is.True,
+            "Tile (3,2) must be within left region's AABB for this test to be meaningful");
+        Assert.That(rightRegion.AABB.Contains(new Vector2(overlappingTile.X, overlappingTile.Y)), Is.True,
+            "Tile (3,2) must be within right region's AABB for this test to be meaningful");
+
+        // HashSet membership (only right region owns it)
+        Assert.That(leftRegion.Tiles.Contains(overlappingTile), Is.False,
+            "Left region's tile set must NOT contain (3,2)");
+        Assert.That(rightRegion.Tiles.Contains(overlappingTile), Is.True,
+            "Right region's tile set must contain (3,2)");
+
+        // ContainsTile (AABB + HashSet two-layer check)
+        Assert.That(leftRegion.ContainsTile(overlappingTile), Is.False,
+            "Left region ContainsTile must return false for overlapping tile (3,2)");
+        Assert.That(rightRegion.ContainsTile(overlappingTile), Is.True,
+            "Right region ContainsTile must return true for overlapping tile (3,2)");
+
+        // Verify no tile belongs to multiple regions
+        var foundTiles = new HashSet<Vector2i>();
+        foreach (var region in comp.Regions)
+        {
+            foreach (var tile in region.Tiles)
+            {
+                Assert.That(foundTiles.Add(tile), Is.True,
+                    $"Tile {tile} belongs to multiple regions");
+            }
         }
     }
 }

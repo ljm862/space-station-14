@@ -45,4 +45,9 @@ public enum PathfindingDebugMode : ushort
     RouteCosts = 1 << 7,
 
     Steering = 1 << 8,
+
+    /// <summary>
+    /// Shows the navmesh regions.
+    /// </summary>
+    NavMesh = 1 << 9,
 }

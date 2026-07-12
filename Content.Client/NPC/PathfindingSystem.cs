@@ -22,6 +22,7 @@ namespace Content.Client.NPC
         [Dependency] private IOverlayManager _overlayManager = default!;
         [Dependency] private IResourceCache _cache = default!;
         [Dependency] private NPCSteeringSystem _steering = default!;
+        [Dependency] private NavMeshSystem _navMesh = default!;
         [Dependency] private MapSystem _mapSystem = default!;
         [Dependency] private SharedTransformSystem _transformSystem = default!;
 
@@ -35,10 +36,26 @@ namespace Content.Client.NPC
                     Breadcrumbs.Clear();
                     Polys.Clear();
                     _overlayManager.RemoveOverlay<PathfindingOverlay>();
+                    _overlayManager.RemoveOverlay<NavMeshOverlay>();
                 }
-                else if (!_overlayManager.HasOverlay<PathfindingOverlay>())
+                else
                 {
-                    _overlayManager.AddOverlay(new PathfindingOverlay(EntityManager, _eyeManager, _inputManager, _cache, this, _mapSystem, _transformSystem));
+                    if (!_overlayManager.HasOverlay<PathfindingOverlay>())
+                    {
+                        _overlayManager.AddOverlay(new PathfindingOverlay(EntityManager, _eyeManager, _inputManager, _cache, this, _mapSystem, _transformSystem));
+                    }
+
+                    if ((value & PathfindingDebugMode.NavMesh) != 0x0)
+                    {
+                        if (!_overlayManager.HasOverlay<NavMeshOverlay>())
+                        {
+                            _overlayManager.AddOverlay(new NavMeshOverlay(EntityManager, _eyeManager, _navMesh, _transformSystem, _mapSystem));
+                        }
+                    }
+                    else
+                    {
+                        _overlayManager.RemoveOverlay<NavMeshOverlay>();
+                    }
                 }
 
                 if ((value & PathfindingDebugMode.Steering) != 0x0)

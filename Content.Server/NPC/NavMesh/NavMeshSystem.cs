@@ -1,10 +1,14 @@
 ﻿using System.Buffers;
 using System.Numerics;
+using Content.Server.Administration.Managers;
 using Content.Server.NPC.Pathfinding;
+using Content.Shared.Administration;
 using Content.Shared.Doors.Components;
-using Content.Shared.NodeContainer;
 using Content.Shared.NPC;
 using Content.Shared.Physics;
+using Robust.Server.Player;
+using Robust.Shared.Player;
+using Robust.Shared.Enums;
 using Robust.Shared.Map.Components;
 using Robust.Shared.Physics;
 using Robust.Shared.Physics.Components;
@@ -20,8 +24,12 @@ public sealed partial class NavMeshSystem : SharedNavMeshSystem
     [Dependency] private IGameTiming _timing = default!;
     [Dependency] private SharedMapSystem _maps = default!;
 
+    [Dependency] private IAdminManager _adminManager = default!;
+    [Dependency] private IPlayerManager _playerManager = default!;
     [Dependency] private EntityQuery<MapGridComponent> _mapGridQuery = default!;
     [Dependency] private EntityQuery<FixturesComponent> _fixturesQuery = default!;
+
+    private readonly Dictionary<ICommonSession, PathfindingDebugMode> _subscribedSessions = new();
 
     private static readonly Vector2i[] CardinalNeighbors = [new(0, 1), new(0, -1), new(1, 0), new(-1, 0)];
 
@@ -31,9 +39,18 @@ public sealed partial class NavMeshSystem : SharedNavMeshSystem
         SubscribeLocalEvent<GridInitializeEvent>(OnGridInit);
         SubscribeLocalEvent<GridRemovalEvent>(OnGridRemoved);
         SubscribeLocalEvent<CollisionChangeEvent>(OnCollisionChange);
-        //SubscribeLocalEvent<GridPathfindingComponent, ComponentShutdown>(OnGridPathShutdown);
         SubscribeLocalEvent<CollisionLayerChangeEvent>(OnCollisionLayerChange);
         SubscribeLocalEvent<TileChangedEvent>(OnTileChange);
+
+        _playerManager.PlayerStatusChanged += OnPlayerChange;
+        SubscribeNetworkEvent<RequestPathfindingDebugMessage>(OnDebugRequest);
+    }
+
+    public override void Shutdown()
+    {
+        base.Shutdown();
+        _subscribedSessions.Clear();
+        _playerManager.PlayerStatusChanged -= OnPlayerChange;
     }
 
     private void OnGridInit(GridInitializeEvent ev)
@@ -125,6 +142,63 @@ public sealed partial class NavMeshSystem : SharedNavMeshSystem
         return false;
     }
 
+    #region Debug
+
+    private void OnDebugRequest(RequestPathfindingDebugMessage msg, EntitySessionEventArgs args)
+    {
+        var pSession = args.SenderSession;
+
+        if (!_adminManager.HasAdminFlag(pSession, AdminFlags.Debug))
+            return;
+
+        if (msg.Mode == PathfindingDebugMode.None)
+        {
+            _subscribedSessions.Remove(args.SenderSession);
+            return;
+        }
+
+        _subscribedSessions[args.SenderSession] = msg.Mode;
+    }
+
+    private void OnPlayerChange(object? sender, SessionStatusEventArgs e)
+    {
+        if (e.NewStatus == SessionStatus.Connected || !_subscribedSessions.ContainsKey(e.Session))
+            return;
+
+        _subscribedSessions.Remove(e.Session);
+    }
+
+    private static bool IsNavMesh(PathfindingDebugMode mode)
+    {
+        return (mode & PathfindingDebugMode.NavMesh) != 0x0;
+    }
+
+    private void SendNavMeshRegions(EntityUid gridUid, GridPathfindingComponent comp)
+    {
+        var msg = new NavMeshRegionsMessage
+        {
+            GridUid = GetNetEntity(gridUid),
+        };
+
+        foreach (var region in comp.Regions)
+        {
+            if (region == null)
+                continue;
+
+            msg.Regions.Add(new NavMeshRegionDebug(region.Id, region.AABB, new List<Vector2i>(region.Tiles)));
+        }
+
+        foreach (var (session, mode) in _subscribedSessions)
+        {
+            if (!IsNavMesh(mode))
+                continue;
+
+            RaiseNetworkEvent(msg, session.Channel);
+        }
+    }
+
+    #endregion
+
     private NavMeshRegion? FindRegionForTile(GridPathfindingComponent comp, Vector2i tile)
     {
         foreach (var region in comp.Regions)
@@ -171,6 +245,9 @@ public sealed partial class NavMeshSystem : SharedNavMeshSystem
 
         // Connect doors as graph edges
         AddEdgesToGraph(doorTiles, comp);
+
+        if (_subscribedSessions.Count > 0)
+            SendNavMeshRegions(gridUid, comp);
     }
 
     private HashSet<Vector2i> GatherBarrierTiles(EntityUid gridUid, MapGridComponent grid)
